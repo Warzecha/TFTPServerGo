@@ -1,0 +1,27 @@
+run:
+
+output:
+  sort-results: true
+
+linters-settings:
+  option: value
+
+linters:
+  enable-all: true
+
+issues:
+  exclude:
+  exclude-rules:
+    - path: _test\.go
+      linters:
+        - gocyclo
+        - errcheck
+        - dupl
+        - gosec
+
+    - linters:
+        - lll
+  fix: false
+
+severity:
+  default-severity: error
