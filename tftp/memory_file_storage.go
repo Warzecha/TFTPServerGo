@@ -10,6 +10,13 @@ type MemoryFileStorage struct {
 	fileContents map[string][]byte
 }
 
+func CreateEmptyMemoryStorage() *MemoryFileStorage {
+	return &MemoryFileStorage{
+		files:        map[string]*FileMetadata{},
+		fileContents: map[string][]byte{},
+	}
+}
+
 func (s *MemoryFileStorage) StartNewUpload(filename string) FileMetadata {
 	newFile := FileMetadata{
 		Filename:     filename,
@@ -40,4 +47,14 @@ func (s *MemoryFileStorage) ReadFileBytes(filename string, start int, end int) [
 	start = int(math.Min(float64(start), float64(len(fullContent))))
 	end = int(math.Min(float64(end), float64(len(fullContent))))
 	return s.fileContents[filename][start:end]
+}
+
+func (s *MemoryFileStorage) GetFileMetadata(filename string) (FileMetadata, bool) {
+	result, exists := s.files[filename]
+
+	if exists {
+		return *result, true
+	} else {
+		return FileMetadata{}, false
+	}
 }

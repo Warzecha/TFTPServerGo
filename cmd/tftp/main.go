@@ -1,16 +1,25 @@
 package main
 
 import (
+	"fmt"
 	"ncd/homework/tftp"
-)
-
-const (
-	ADDRESS string = "127.0.0.1:6969"
+	"os"
+	"strconv"
 )
 
 func main() {
+	if len(os.Args) == 1 {
+		fmt.Println("Required argument port.")
+		return
+	}
 
-	udp_server := tftp.TftpServer{}
+	port, err := strconv.Atoi(os.Args[1])
 
-	udp_server.Start()
+	if err != nil {
+		fmt.Printf("Provided invalid port: %s \n", os.Args[1])
+		return
+	}
+
+	tftp_server := tftp.NewServer(port)
+	tftp_server.Start()
 }

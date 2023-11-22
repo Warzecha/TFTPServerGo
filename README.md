@@ -6,8 +6,26 @@ particular, options are not recognized.
 
 # Usage
 
-<!-- For candidate to fill out -->
+To start the server run:
+
+```
+go run cmd/tftp/main.go <port>
+```
+
+Example:
+
+```
+go run cmd/tftp/main.go 69
+```
 
 # Testing
 
-<!-- For candidate to fill out -->
+To run tests, run:
+
+```
+go test -timeout 30s ncd/homework/tftp
+```
+
+# Currently unsupported
+
+* Handling server side retransmission.

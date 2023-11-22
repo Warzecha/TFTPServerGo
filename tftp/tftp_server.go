@@ -11,130 +11,177 @@ import (
 const (
 	min_data_port int = 49152
 	max_data_port int = 65535
-
-	dummy_data_port int = 49155
 )
 
 type TftpServer struct {
-	main_udp_server UdpServer
-
-	secondary_udp_connection UdpServer
-
-	fileStorage MemoryFileStorage
+	Port        int
+	fileStorage FileStorage
 	uploads     map[string]string
 	downloads   map[string]DownloadMetadata
+	quit        chan bool
 }
 
-func (s *TftpServer) Start() {
-
-	main_udp_server := UdpServer{
-		Port:        6969,
-		ThreadCount: 1,
-		Handler:     s.ConnectionInitializationHandler,
+func NewServer(port int) *TftpServer {
+	return &TftpServer{
+		Port:        port,
+		uploads:     map[string]string{},
+		downloads:   map[string]DownloadMetadata{},
+		fileStorage: CreateEmptyMemoryStorage(),
 	}
-
-	s.uploads = map[string]string{}
-	s.downloads = map[string]DownloadMetadata{}
-
-	s.fileStorage = MemoryFileStorage{
-		files: map[string]*FileMetadata{
-			"test2": &FileMetadata{
-				Filename:   "test2",
-				IsComplete: true,
-			},
-		},
-		fileContents: map[string][]byte{
-			"test2": []byte("Hello World"),
-		},
-	}
-
-	main_udp_server.Start()
 }
 
-func (s *TftpServer) ConnectionInitializationHandler(connection *net.UDPConn) {
+func (s *TftpServer) Start() error {
+	fmt.Printf("Starting TFTP server on port %d \n", s.Port)
+
+	udpAddress, err := net.ResolveUDPAddr("udp4", "127.0.0.1:"+strconv.Itoa(s.Port))
+
+	if err != nil {
+		fmt.Println("Error resolving server address.")
+		return err
+	}
+
+	connection, err := net.ListenUDP("udp4", udpAddress)
+
+	if err != nil {
+		fmt.Printf("Error listening on address: %s \n", udpAddress)
+		return err
+	}
+
+	defer connection.Close()
+
+	s.quit = make(chan bool)
 
 	buffer := make([]byte, 512)
 
 	for {
-		_, addr, err := connection.ReadFromUDP(buffer)
-		if err != nil {
-			log.Fatal(err)
-		}
-
-		op, _ := PeekOp(buffer)
-
-		fmt.Printf("ConnectionInitializationHandler Received op: %s\n", op)
-
-		switch op {
-		case OpWrite:
-			var requestPacket PacketRequest
-			requestPacket.UnmarshalBinary(buffer)
-
-			fmt.Printf("Received Write request for file: %s with mode: %s\n", requestPacket.Filename, requestPacket.Mode)
-
-			data_port := s.selectRandomPort()
-			data_port_str := strconv.Itoa(data_port)
-
-			fmt.Printf("Will use data port: %s \n", data_port_str)
-
-			data_udp_address, err := net.ResolveUDPAddr("udp4", "127.0.0.1:"+data_port_str)
-			s.uploads[data_port_str] = requestPacket.Filename
-
-			s.handleError(err)
-
-			data_connection, err := net.DialUDP("udp4", data_udp_address, addr)
-			s.handleError(err)
-
-			defer data_connection.Close()
-
-			go s.DataWriteHandler(data_connection, data_port_str)
-
-			s.sendAck(data_connection, 0)
-
-		case OpRead:
-			var requestPacket PacketRequest
-			requestPacket.UnmarshalBinary(buffer)
-
-			fmt.Printf("Received Read request for file: %s with mode: %s\n", requestPacket.Filename, requestPacket.Mode)
-
-			// TODO Validate if the file exists and mode is correct
-
-			data_port := s.selectRandomPort()
-			data_port_str := strconv.Itoa(data_port)
-
-			fmt.Printf("Will use data port: %s \n", data_port_str)
-
-			data_udp_address, err := net.ResolveUDPAddr("udp4", "127.0.0.1:"+data_port_str)
-			s.handleError(err)
-
-			s.downloads[data_port_str] = DownloadMetadata{
-				Filename:     requestPacket.Filename,
-				LastBlockNum: 0,
-			}
-
-			data_connection, err := net.DialUDP("udp4", data_udp_address, addr)
-			s.handleError(err)
-
-			defer data_connection.Close()
-
-			go s.DataReadHandler(data_connection, data_port_str)
-
-			s.readAndSendFile(data_connection, requestPacket.Filename, 0)
-
+		select {
+		case <-s.quit:
+			fmt.Printf("Terminating server...")
+			return nil
 		default:
-			fmt.Println("Unhandled operation")
+			s.acceptReqest(connection, buffer)
+		}
+	}
+}
+
+func (s *TftpServer) Terminate() {
+	s.quit <- true
+}
+
+func (s *TftpServer) connectionInitializationHandler(connection *net.UDPConn, quit chan bool) {
+	buffer := make([]byte, 512)
+
+	for {
+		select {
+		case <-quit:
+			fmt.Println("Exiting connectionInitializationHandler...")
+			return
+		default:
+			s.acceptReqest(connection, buffer)
+		}
+	}
+}
+
+func (s *TftpServer) acceptReqest(connection *net.UDPConn, buffer []byte) {
+
+	_, addr, err := connection.ReadFromUDP(buffer)
+	if err != nil {
+		log.Fatal(err)
+	}
+
+	op, _ := PeekOp(buffer)
+
+	switch op {
+	case OpWrite:
+		var requestPacket PacketRequest
+		requestPacket.UnmarshalBinary(buffer)
+
+		fmt.Printf("Received Write request for file: %s with mode: %s\n", requestPacket.Filename, requestPacket.Mode)
+
+		data_port := s.selectRandomPort()
+		data_port_str := strconv.Itoa(data_port)
+
+		fmt.Printf("Will use data port: %s \n", data_port_str)
+
+		data_udp_address, err := net.ResolveUDPAddr("udp4", "127.0.0.1:"+data_port_str)
+		s.uploads[data_port_str] = requestPacket.Filename
+
+		if err != nil {
+			fmt.Printf("Error when resolving address for data port: %s. \n", data_port_str)
+			s.sendError(connection, addr, ErrNotDefined, "Unknown error occurred.")
+			break
 		}
 
+		data_connection, err := net.DialUDP("udp4", data_udp_address, addr)
+
+		if err != nil {
+			fmt.Printf("Error when opening data connection on port: %s. \n", data_port_str)
+			s.sendError(connection, addr, ErrNotDefined, "Unknown error occurred.")
+			break
+		}
+
+		go s.dataWriteHandler(data_connection, data_port_str)
+
+		s.sendAck(data_connection, 0)
+
+	case OpRead:
+		var requestPacket PacketRequest
+		requestPacket.UnmarshalBinary(buffer)
+
+		fmt.Printf("Received Read request for file: %s with mode: %s\n", requestPacket.Filename, requestPacket.Mode)
+
+		if requestPacket.Mode != "octet" {
+			s.sendError(connection, addr, ErrIllegal, "Only octet mode is supported")
+			break
+		}
+
+		if _, exists := s.fileStorage.GetFileMetadata(requestPacket.Filename); !exists {
+			s.sendError(connection, addr, ErrFileNotFound, fmt.Sprintf("File with name '%s' does not exist.", requestPacket.Filename))
+			break
+		}
+
+		data_port := s.selectRandomPort()
+		data_port_str := strconv.Itoa(data_port)
+
+		fmt.Printf("Will use data port: %s \n", data_port_str)
+
+		data_udp_address, err := net.ResolveUDPAddr("udp4", "127.0.0.1:"+data_port_str)
+
+		if err != nil {
+			fmt.Printf("Error when resolving address for data port: %s. \n", data_port_str)
+			s.sendError(connection, addr, ErrNotDefined, "Unknown error occurred.")
+			break
+		}
+
+		s.downloads[data_port_str] = DownloadMetadata{
+			Filename:     requestPacket.Filename,
+			LastBlockNum: 0,
+		}
+
+		data_connection, err := net.DialUDP("udp4", data_udp_address, addr)
+
+		if err != nil {
+			fmt.Printf("Error when opening data connection on port: %s. \n", data_port_str)
+			s.sendError(connection, addr, ErrNotDefined, "Unknown error occurred.")
+			break
+		}
+
+		go s.dataReadHandler(data_connection, data_port_str)
+
+		s.readAndSendFile(data_connection, requestPacket.Filename, 0)
+	case OpAck:
+		fmt.Printf("Received ACK")
+	default:
+		fmt.Println("Unhandled operation")
 	}
 
 }
 
-func (s *TftpServer) DataWriteHandler(connection *net.UDPConn, port string) {
-	buffer := make([]byte, 512)
-
+func (s *TftpServer) dataWriteHandler(connection *net.UDPConn, port string) {
 	for {
-		_, _, err := connection.ReadFromUDP(buffer)
-		s.handleError(err)
+		buffer := make([]byte, 516)
+		n, _, err := connection.ReadFromUDP(buffer)
+		s.logErrorIfExists(err)
 
 		op, _ := PeekOp(buffer)
 
@@ -144,18 +191,25 @@ func (s *TftpServer) DataWriteHandler(connection *net.UDPConn, port string) {
 			dataPacket.UnmarshalBinary(buffer)
 
 			fmt.Printf("Received Data request for with BlockNum: %d on port %s\n", dataPacket.BlockNum, port)
+
 			if dataPacket.BlockNum == 1 {
 				s.fileStorage.StartNewUpload(s.uploads[port])
 			}
 
-			s.fileStorage.AppendData(s.uploads[port], int(dataPacket.BlockNum), dataPacket.Data)
+			s.fileStorage.AppendData(s.uploads[port], int(dataPacket.BlockNum), dataPacket.Data[0:n-4])
 
-			if len(dataPacket.Data) < 512 {
+			is_complete := n < 516
+			if is_complete {
 				s.fileStorage.CompleteUpload(s.uploads[port])
 				delete(s.uploads, port)
+				is_complete = true
 			}
 
 			s.sendAck(connection, dataPacket.BlockNum)
+
+			if is_complete {
+				defer connection.Close()
+			}
 
 		case OpAck:
 			var ackPacket PacketAck
@@ -170,12 +224,12 @@ func (s *TftpServer) DataWriteHandler(connection *net.UDPConn, port string) {
 	}
 }
 
-func (s *TftpServer) DataReadHandler(connection *net.UDPConn, port string) {
+func (s *TftpServer) dataReadHandler(connection *net.UDPConn, port string) {
 	buffer := make([]byte, 512)
 
 	for {
 		_, _, err := connection.ReadFromUDP(buffer)
-		s.handleError(err)
+		s.logErrorIfExists(err)
 
 		op, _ := PeekOp(buffer)
 
@@ -207,7 +261,7 @@ func (s *TftpServer) readAndSendFile(connection *net.UDPConn, filename string, p
 	}
 
 	data_data, err := dataPacket.MarshalBinary()
-	s.handleError(err)
+	s.logErrorIfExists(err)
 
 	connection.Write(data_data)
 }
@@ -231,7 +285,27 @@ func (s *TftpServer) sendAck(connection *net.UDPConn, blockNum uint16) {
 	}
 }
 
-func (s *TftpServer) handleError(err error) {
+func (s *TftpServer) sendError(connection *net.UDPConn, addr *net.UDPAddr, errCode ErrorCode, msg string) {
+	errPacket := PacketError{
+		Op:    OpError,
+		Error: errCode,
+		Msg:   msg,
+	}
+
+	err_data, err := errPacket.MarshalBinary()
+
+	if err != nil {
+		fmt.Printf("Error marshalling error: %s \n", err)
+	}
+
+	_, err = connection.WriteToUDP(err_data, addr)
+
+	if err != nil {
+		fmt.Printf("Error packet write error: %s \n", err)
+	}
+}
+
+func (s *TftpServer) logErrorIfExists(err error) {
 	if err != nil {
 		fmt.Printf("Error occured: %s \n", err)
 	}
